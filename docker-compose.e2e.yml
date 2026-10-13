@@ -1,0 +1,6 @@
+# Overlay for `make e2e`: the e2e tests reach the API inside the compose network,
+# so the host port is not published and the run does not clash with a working
+# environment. Needs Docker Compose >= 2.24 (`!reset`).
+services:
+  api:
+    ports: !reset []

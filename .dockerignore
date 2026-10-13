@@ -1,0 +1,26 @@
+# Git and IDE
+.git
+.gitignore
+.cursor
+.idea
+.vscode
+
+# Coverage profiles (test sources stay: the test image is built from this context)
+coverage.out
+coverage*.out
+
+# Local / generated noise
+bin/
+dist/
+tmp/
+temp/
+*.tmp.*
+temp.*
+*.exe
+*.test
+*.out
+
+# Internal working materials (never in images)
+tech-spec*
+*.pdf
+docs/arch-check.md

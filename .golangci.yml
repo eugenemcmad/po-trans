@@ -1,0 +1,20 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - bodyclose
+    - noctx
+    - misspell
+    - unconvert
+    - gocritic
+    - testifylint
+    - sloglint
+    - gosec
+    - contextcheck

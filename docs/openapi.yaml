@@ -1,0 +1,325 @@
+openapi: 3.0.3
+info:
+  title: Coin transfer service
+  version: 1.0.0
+  description: |
+    Transfers of in-game coins between player accounts.
+
+    Amounts and balances are integers in coins (the smallest, indivisible unit).
+
+    **Errors share one format**, `{"status": "<rejected|error>", "reason": "<text>"}`:
+    `status` is `rejected` only for `422` (a stored outcome of a transfer, visible
+    through `GET /api/v1/transfers/{idempotency_key}`) and `error` for everything else.
+    Texts of `reason` are stable. The details of a `500` are only in the service log.
+
+    **Idempotency.** A repeated `POST` with the same `idempotency_key` and the same
+    `from_account_id`, `to_account_id`, `amount` returns the same status and body as
+    the first one and does not move money again — for rejected transfers too. Any
+    other data under a used key is `409`, even when the new data is invalid. Keys
+    are global, kept forever, compared byte for byte (case and spaces matter).
+
+    **Routing errors.** An unknown path answers `404` `{"status":"error","reason":"not found"}`;
+    a wrong method answers `405` `{"status":"error","reason":"method not allowed"}`
+    with an `Allow` header. Every response carries an `X-Request-ID` header
+    (the client's one if it sent a sane `X-Request-ID`, otherwise a generated one).
+servers:
+  - url: http://localhost:3000
+paths:
+  /api/v1/transfers:
+    post:
+      summary: Transfer coins
+      operationId: createTransfer
+      description: |
+        Checks, in this order: `Content-Type` and body; the idempotency key (a used
+        key with other data is `409`); the fields (`400`); self-transfer, existing
+        accounts, sufficient funds (`422`). Moving the whole balance is allowed.
+        Unknown JSON fields are ignored; field names are case sensitive.
+        The body is limited to 64 KiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        '200':
+          description: The transfer was made (or this is a repeat of a completed one).
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferCompleted'
+        '400':
+          description: |
+            Invalid request. `reason` is one of: `invalid json`, `unsupported content type`,
+            `request body too large`, `<field> is required`, `<field> must be a string`,
+            `<field> is too long`, `<field> contains invalid characters`
+            (`<field>` is `idempotency_key`, `from_account_id` or `to_account_id`),
+            `amount must be a positive integer`. Only the first error is reported.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {status: error, reason: amount must be a positive integer}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409':
+          description: The idempotency key was used with different `from_account_id`, `to_account_id` or `amount`.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {status: error, reason: idempotency key reused with different parameters}
+        '422':
+          description: |
+            The transfer was rejected; this outcome is stored under the key, and a repeat
+            returns it again even if the balance has changed since.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferRejected'
+              example: {status: rejected, reason: insufficient funds}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/v1/transfers/{idempotency_key}:
+    get:
+      summary: Get a transfer by its idempotency key
+      operationId: getTransfer
+      description: |
+        Returns completed and rejected transfers. The key is one path segment encoded
+        per RFC 3986 (`/` as `%2F`, a space as `%20`, `..` as `%2E%2E`). A key that
+        cannot exist (longer than 255 characters, control characters, invalid UTF-8)
+        is simply not found.
+      parameters:
+        - name: idempotency_key
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The stored transfer.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              examples:
+                completed:
+                  value:
+                    transfer_id: 0197a3c2-7b0e-7c1c-9a4e-5f1d2b3c4d5e
+                    idempotency_key: 550e8400-e29b-41d4-a716-446655440000
+                    from_account_id: acc_1
+                    to_account_id: acc_2
+                    amount: 100
+                    status: completed
+                    created_at: '2025-01-01T00:00:00Z'
+                rejected:
+                  value:
+                    transfer_id: 0197a3c2-7b0e-7c1c-9a4e-5f1d2b3c4d5f
+                    idempotency_key: 550e8400-e29b-41d4-a716-446655440001
+                    from_account_id: acc_1
+                    to_account_id: acc_2
+                    amount: 100000
+                    status: rejected
+                    reason: insufficient funds
+                    created_at: '2025-01-01T00:00:00Z'
+        '404':
+          description: No transfer was stored under this key.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {status: error, reason: transfer not found}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/v1/accounts/{id}:
+    get:
+      summary: Get the balance of an account
+      operationId: getAccount
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: The account.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '404':
+          description: |
+            No such account (also for ids that cannot exist: longer than 64 characters,
+            control characters, invalid UTF-8). Note that `POST /api/v1/transfers`
+            answers `422` for an unknown account in the body.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {status: error, reason: account not found}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /:
+    get:
+      summary: Service is reachable
+      operationId: root
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+  /healthz:
+    get:
+      summary: Liveness
+      operationId: healthz
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+  /readyz:
+    get:
+      summary: Readiness (checks the database)
+      operationId: readyz
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503':
+          description: The database is unavailable.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: {status: error, reason: database unavailable}
+components:
+  headers:
+    RequestID:
+      description: Request id, for finding the request in the service log.
+      schema: {type: string, maxLength: 128}
+  responses:
+    Ok:
+      description: Service is up.
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Status'
+    MethodNotAllowed:
+      description: The path exists, the method is not allowed. `Allow` lists the allowed methods.
+      headers:
+        Allow:
+          schema: {type: string}
+          description: '`POST` for /api/v1/transfers; `GET, HEAD` for the other paths.'
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {status: error, reason: method not allowed}
+    InternalError:
+      description: Unexpected failure. Nothing was stored for a failed transfer, so it is safe to repeat the request with the same key.
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {status: error, reason: internal error}
+  schemas:
+    TransferRequest:
+      type: object
+      required: [idempotency_key, from_account_id, to_account_id, amount]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Any non-blank string without control characters, chosen by the client (a UUID is typical).
+          example: 550e8400-e29b-41d4-a716-446655440000
+        from_account_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: acc_1
+        to_account_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: acc_2
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Coins. An integer literal only; `100.0` and `1e2` are not accepted.
+          example: 100
+    TransferCompleted:
+      type: object
+      additionalProperties: false
+      required: [transfer_id, status, from_account_id, to_account_id, amount]
+      properties:
+        transfer_id: {type: string, format: uuid}
+        status: {type: string, enum: [completed]}
+        from_account_id: {type: string}
+        to_account_id: {type: string}
+        amount: {type: integer, format: int64}
+    TransferRejected:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: {type: string, enum: [rejected]}
+        reason:
+          type: string
+          enum: [insufficient funds, self-transfer not allowed, account not found]
+    Transfer:
+      type: object
+      additionalProperties: false
+      required: [transfer_id, idempotency_key, from_account_id, to_account_id, amount, status, created_at]
+      properties:
+        transfer_id: {type: string, format: uuid}
+        idempotency_key: {type: string}
+        from_account_id: {type: string}
+        to_account_id: {type: string}
+        amount: {type: integer, format: int64}
+        status: {type: string, enum: [completed, rejected]}
+        reason:
+          type: string
+          description: Present only when `status` is `rejected`.
+          enum: [insufficient funds, self-transfer not allowed, account not found]
+        created_at:
+          type: string
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+          description: RFC 3339, UTC, second precision.
+          example: '2025-01-01T00:00:00Z'
+    Account:
+      type: object
+      additionalProperties: false
+      required: [account_id, balance]
+      properties:
+        account_id: {type: string}
+        balance: {type: integer, format: int64, minimum: 0}
+    Status:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [ok]}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: {type: string, enum: [error]}
+        reason: {type: string}

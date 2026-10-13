@@ -1,0 +1,141 @@
+# Demo environment. The database password defaults to "app"; set DB_PASSWORD to change it.
+# The API ports are published on the loopback interface only.
+services:
+  db:
+    image: postgres:18-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+      POSTGRES_DB: app
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      retries: 15
+
+  # One-shot: reset the schema, apply migrations, load the demo accounts.
+  # Running it again on a live environment deliberately resets all data.
+  demo-setup:
+    image: postgres:18-alpine
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: app
+      PGPASSWORD: ${DB_PASSWORD:-app}
+      PGDATABASE: app
+    volumes:
+      - ./migrations:/sql/migrations:ro
+      - ./deploy/local:/sql/local:ro
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - --single-transaction
+      - -f
+      - /sql/local/reset.sql
+      - -f
+      - /sql/migrations/00001_init.sql
+      - -f
+      - /sql/local/seed.sql
+
+  api:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    stop_grace_period: 20s
+    depends_on:
+      demo-setup:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://app:${DB_PASSWORD:-app}@db:5432/app?sslmode=disable
+      # Swagger UI at /docs, for a quick check of the demo; off by default, never in production.
+      DOCS_ENABLED: "true"
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/readyz"]
+      interval: 5s
+      retries: 10
+
+  # --- tests (profile "test") ---
+
+  db-test:
+    profiles: ["test"]
+    image: postgres:18-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+      POSTGRES_DB: app
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      retries: 15
+
+  test-setup:
+    profiles: ["test"]
+    image: postgres:18-alpine
+    restart: "no"
+    depends_on:
+      db-test:
+        condition: service_healthy
+    environment:
+      PGHOST: db-test
+      PGUSER: app
+      PGPASSWORD: ${DB_PASSWORD:-app}
+      PGDATABASE: app
+    volumes:
+      - ./migrations:/sql/migrations:ro
+      - ./deploy/local:/sql/local:ro
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - --single-transaction
+      - -f
+      - /sql/local/reset.sql
+      - -f
+      - /sql/migrations/00001_init.sql
+
+  # unit + integration tests with the race detector; also runs the linter
+  # (docker compose --profile test run --rm --build --no-deps tests golangci-lint run).
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    depends_on:
+      test-setup:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://app:${DB_PASSWORD:-app}@db-test:5432/app?sslmode=disable
+    # Fail if either part has no tests: `go test` without test files exits 0.
+    command:
+      - sh
+      - -c
+      - >-
+        go test -list . ./internal/... | grep -q '^Test' &&
+        go test -list . ./tests/integration/... | grep -q '^Test' &&
+        go test -race ./internal/... ./tests/integration/...
+
+  e2e:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      E2E_BASE_URL: http://api:3000
+    command:
+      - sh
+      - -c
+      - >-
+        go test -tags e2e -list . ./tests/e2e/... | grep -q '^Test' &&
+        go test -tags e2e -count=1 ./tests/e2e/...
